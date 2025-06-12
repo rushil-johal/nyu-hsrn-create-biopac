@@ -1,0 +1,15 @@
+# dotenv file (do not commit your secrets)
+.env
+.DS_Store
+# Editor directories and files
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.swp
+
