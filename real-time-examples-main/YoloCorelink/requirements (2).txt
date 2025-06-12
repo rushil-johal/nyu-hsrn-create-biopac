@@ -1,0 +1,7 @@
+aiofiles
+aiologger
+asyncio
+corelink-client
+numpy
+opencv-python-headless
+ultralytics

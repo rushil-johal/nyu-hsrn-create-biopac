@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: detect-process-job
+  namespace: fenton-neuroscience
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: detect-process-container
+          image: registry.hsrn.nyu.edu/vip/corelink-examples/objectdetect:latest
+          command: ["sh", "-c"]
+          args:
+            - |
+           
+              tail -f /dev/null
+          resources:
+            limits:
+              nvidia.com/gpu: 1  # Limit 1 NVIDIA GPU
+              cpu: "16"          # Limit 16 CPUs
+              memory: "64Gi"     # Limit 64Gi memory
+            requests:
+              nvidia.com/gpu: 1  # Request 1 NVIDIA GPU
+              cpu: "16"          # Request 16 CPUs
+              memory: "64Gi"     # Request 64Gi memory
+          env:
+            - name: TF_FORCE_GPU_ALLOW_GROWTH
+              value: "true"
+            - name: TF_GPU_THREAD_MODE
+              value: "gpu_private"
+#      affinity:
+#        nodeAffinity:
+#          requiredDuringSchedulingIgnoredDuringExecution:
+#            nodeSelectorTerms:
+#            - matchExpressions:
+#              - key: kubernetes.io/hostname
+#                operator: In
+#                values:
+#                - "hsrn-ed10d-7e12"  # Replace with your specific node name
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+  backoffLimit: 0
