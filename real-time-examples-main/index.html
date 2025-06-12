@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Corelink Real-Time Data Visualization</title>
+    <!-- Import the Corelink browser library -->
+    <script src="https://corelink.hpc.nyu.edu/client/browser/corelink.browser.lib.js"></script>
+    <!-- Import Plotly for visualization -->
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 20px;
+        background-color: #f5f5f5;
+      }
+      button {
+        margin: 5px;
+        padding: 5px 10px;
+        cursor: pointer;
+      }
+      #stream-container {
+        margin-top: 20px;
+      }
+      .stream-entry {
+        border: 1px solid #ccc;
+        padding: 5px;
+        margin: 5px;
+        display: inline-block;
+      }
+      /* Container for a stream’s plots */
+      .stream-charts-container {
+        border: 1px solid #ddd;
+        padding: 10px;
+        margin-bottom: 20px;
+        background-color: #fff;
+      }
+      .stream-charts-container h2 {
+        margin-top: 0;
+      }
+      /* Combined plot styles */
+      .combined-chart {
+        width: 100%;
+        height: 600px;
+        margin-bottom: 20px;
+      }
+      /* Responsive grid for the 16 separate charts */
+      .chart-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 20px;
+      }
+      /* Each individual chart */
+      .port-chart {
+        width: 100%;
+        height: 300px;
+        background-color: #fff;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Corelink Real-Time Data Visualization</h1>
+    <p id="login-status" style="color: red;">Not connected</p>
+    <button id="login-btn">Login</button>
+    <button id="select-workspace-btn" disabled>Select Workspace</button>
+    <select id="workspace-dropdown" style="display: none;"></select>
+    <!-- List Streams button is enabled by default -->
+    <button id="list-streams-btn">List Streams</button>
+    <button id="disconnect-btn" disabled>Disconnect All</button>
+    
+    <div id="stream-container">
+      <h3>Available Streams:</h3>
+      <p>Click a stream entry to view its real-time data.</p>
+      <div id="streams-list"></div>
+    </div>
+    
+    <div id="plot-container"></div>
+    
+    <script>
+      // Global state and configuration
+      let selectedWorkspace = "CREATE";  // Default workspace is "CREATE"
+      let connected = false;
+      const activeStreams = {};      // activeStreams[streamID] = true if active
+      const chartIntervals = {};     // Holds update intervals per stream
+      const MAX_DATA_POINTS = 100;   // Maximum points to display in a chart
+
+      // Corelink configuration
+      const config = {
+        username: "",  // Set via prompt
+        password: "",  // Set via prompt
+        ControlIP: "corelink.hpc.nyu.edu",
+        ControlPort: 20012,
+        autoReconnect: false
+      };
+
+      // --- Login ---
+      async function doLogin() {
+        config.username = prompt("Enter username", "Testuser");
+        config.password = prompt("Enter password", "Testpassword");
+        try {
+          const result = await corelink.connect(
+            { username: config.username, password: config.password },
+            config
+          );
+          if (result) {
+            document.getElementById("login-status").innerText = "Connected to Corelink";
+            document.getElementById("login-status").style.color = "green";
+            connected = true;
+            // Enable workspace selection and disconnect button
+            document.getElementById("select-workspace-btn").disabled = false;
+            document.getElementById("disconnect-btn").disabled = false;
+            // Since default workspace is CREATE, enable list streams button immediately.
+            document.getElementById("list-streams-btn").disabled = false;
+            selectedWorkspace = "CREATE";
+          }
+        } catch (err) {
+          console.error("Login error:", err);
+          alert("Login failed: " + err);
+        }
+      }
+
+      // --- Populate Workspaces ---
+      async function populateWorkspaces() {
+        const dropdown = document.getElementById("workspace-dropdown");
+        dropdown.innerHTML = "";
+        let workspaces = [];
+        try {
+          if (typeof corelink.listWorkspaces === "function") {
+            workspaces = await corelink.listWorkspaces();
+            if (!Array.isArray(workspaces) || workspaces.length === 0) {
+              throw new Error("No workspaces returned from corelink.listWorkspaces()");
+            }
+          } else {
+            workspaces = ["Holodeck", "CREATE"];
+          }
+        } catch (err) {
+          console.error("Error retrieving workspaces:", err);
+          alert("Error retrieving workspace list: " + err);
+          workspaces = ["Holodeck", "CREATE"];
+        }
+        // Add "CREATE" option at the top.
+        const createOption = document.createElement("option");
+        createOption.value = "CREATE";
+        createOption.innerText = "CREATE";
+        dropdown.appendChild(createOption);
+        workspaces.forEach(ws => {
+          const option = document.createElement("option");
+          option.value = ws;
+          option.innerText = ws;
+          dropdown.appendChild(option);
+        });
+        dropdown.style.display = "inline";
+        dropdown.onchange = function () {
+          selectedWorkspace = this.value;
+          document.getElementById("list-streams-btn").disabled = false;
+          alert("Workspace '" + selectedWorkspace + "' selected.");
+        };
+      }
+
+      // --- List Streams ---
+      async function listStreams() {
+        if (!connected) {
+          alert("Not connected. Please login again.");
+          return;
+        }
+        if (!selectedWorkspace) {
+          alert("Please select a workspace first.");
+          return;
+        }
+        try {
+          await corelink.createReceiver({
+            workspace: selectedWorkspace,
+            protocol: "ws",
+            type: "sensorData",
+            echo: true,
+            alert: true
+          }).catch(err => {
+            console.error("Error creating receiver:", err);
+          });
+        } catch (err) {
+          console.error("Error listing streams:", err);
+          alert("Error listing streams: " + err);
+        }
+      }
+
+      // --- Receiver Event Handler ---
+      corelink.on("receiver", async (data) => {
+        console.log("Receiver event received:", data);
+        if (data && data.streamID) {
+          try {
+            await corelink.subscribe({ streamIDs: [data.streamID] });
+          } catch (err) {
+            console.error("Subscription error for stream " + data.streamID, err);
+          }
+          if (!activeStreams[data.streamID]) {
+            activeStreams[data.streamID] = true;
+            addStreamToList(data);
+          }
+        }
+      });
+
+      // --- Data Event Handler ---
+      // Parse incoming data and push it into the per‑stream buffer.
+      corelink.on("data", (streamID, data, header) => {
+        console.log("Data received: ", streamID, data, header);
+        if (!activeStreams[streamID]) return;
+        let rawData = "";
+        if (typeof data === "string") {
+          rawData = data;
+        } else {
+          try {
+            rawData = String.fromCharCode.apply(null, new Uint8Array(data));
+          } catch (e) {
+            console.error("Error converting data for stream " + streamID, e);
+            return;
+          }
+        }
+        // Expected data format: 19 comma‑separated values:
+        // sample_counter, port1, port2, ..., port16, timestamp, device_type
+        const values = rawData.split(",").map(v => v.trim());
+        if (values.length !== 19) {
+          console.warn("Expected 19 values but got:", values.length, "Data:", rawData);
+          return;
+        }
+        const sampleCounter = Number(values[0]);
+        const portVals = values.slice(1, 17).map(Number);
+        const timestamp = Number(values[17]); // not used for plotting here
+        // Device type from the 19th column:
+        const deviceType = values[18].replace(/['"]/g, "").trim();
+        // Store device type in a global variable for the stream (if not set yet)
+        if (!window[streamID + "_deviceType"]) {
+          window[streamID + "_deviceType"] = deviceType;
+          // Update the UI label for this stream
+          const streamEntry = document.getElementById("stream-entry-" + streamID);
+          if (streamEntry) {
+            // Update the label to show the device type instead of participant number
+            streamEntry.querySelector("span").innerText = "Stream ID: " + streamID + " (device: " + deviceType + ") ";
+          }
+        }
+        if (!window[streamID + "_parsedData"]) {
+          window[streamID + "_parsedData"] = [];
+        }
+        window[streamID + "_parsedData"].push({ x: sampleCounter, y: portVals });
+      });
+
+      // --- Add Stream Entry to UI ---
+      function addStreamToList(stream) {
+        const streamsListDiv = document.getElementById("streams-list");
+        const streamDiv = document.createElement("div");
+        streamDiv.id = "stream-entry-" + stream.streamID;
+        streamDiv.className = "stream-entry";
+        
+        const streamInfo = document.createElement("span");
+        // Initially, device type is unknown until sensor data arrives.
+        streamInfo.innerText = "Stream ID: " + stream.streamID + " (device: unknown) ";
+        
+        const plotBtn = document.createElement("button");
+        plotBtn.innerText = "Plot";
+        plotBtn.onclick = () => { plotStream(stream.streamID); };
+        
+        const killBtn = document.createElement("button");
+        killBtn.innerText = "Kill Stream";
+        killBtn.onclick = () => { killStream(stream.streamID); };
+        
+        streamDiv.appendChild(streamInfo);
+        streamDiv.appendChild(plotBtn);
+        streamDiv.appendChild(killBtn);
+        streamsListDiv.appendChild(streamDiv);
+      }
+
+      // Helper function to assign colors to traces
+      function getColor(traceIndex) {
+        return `hsl(${(traceIndex * 360 / 17)}, 70%, 50%)`;
+      }
+
+      // --- Plot Stream Data ---
+      function plotStream(streamID) {
+        // Hide all other stream plots
+        const streamContainers = document.querySelectorAll(".stream-charts-container");
+        streamContainers.forEach(div => {
+          div.style.display = "none";
+        });
+        
+        // Create container for this stream's plots if not present
+        let containerDiv = document.getElementById("plot-" + streamID);
+        if (!containerDiv) {
+          containerDiv = document.createElement("div");
+          containerDiv.id = "plot-" + streamID;
+          containerDiv.className = "stream-charts-container";
+          document.getElementById("plot-container").appendChild(containerDiv);
+          
+          const heading = document.createElement("h2");
+          heading.innerText = "Stream: " + streamID;
+          containerDiv.appendChild(heading);
+        }
+        containerDiv.style.display = "block";
+        
+        // Combined Plot container
+        let combinedDiv = document.getElementById("plot-" + streamID + "-combined");
+        if (!combinedDiv) {
+          combinedDiv = document.createElement("div");
+          combinedDiv.id = "plot-" + streamID + "-combined";
+          combinedDiv.className = "combined-chart";
+          containerDiv.appendChild(combinedDiv);
+        }
+        
+        // Grid for separate port plots
+        let gridDiv = document.getElementById("plot-grid-" + streamID);
+        if (!gridDiv) {
+          gridDiv = document.createElement("div");
+          gridDiv.id = "plot-grid-" + streamID;
+          gridDiv.className = "chart-grid";
+          containerDiv.appendChild(gridDiv);
+        } else {
+          gridDiv.innerHTML = "";
+        }
+        
+        // Initialize Combined Plot with 16 empty traces
+        const combinedTraces = [];
+        for (let i = 1; i <= 16; i++) {
+          combinedTraces.push({
+            x: [],
+            y: [],
+            mode: "lines+markers",
+            name: "Port #" + i,
+            line: { shape: "spline", color: getColor(i) }
+          });
+        }
+        const combinedLayout = {
+          title: "Combined Plot (Ports Only)",
+          xaxis: { title: "Sample Counter" },
+          yaxis: { title: "Value" },
+          margin: { t: 30, r: 20, b: 40, l: 40 }
+        };
+        Plotly.newPlot(combinedDiv, combinedTraces, combinedLayout);
+        
+        // Initialize 16 separate port plots
+        for (let i = 1; i <= 16; i++) {
+          const portDivId = "plot-" + streamID + "-port" + i;
+          const portDiv = document.createElement("div");
+          portDiv.id = portDivId;
+          portDiv.className = "port-chart";
+          gridDiv.appendChild(portDiv);
+          
+          Plotly.newPlot(portDiv, [{
+            x: [],
+            y: [],
+            mode: "lines",
+            line: { shape: "spline", color: "blue" }
+          }], {
+            title: "Port #" + i,
+            xaxis: { title: "Sample Counter" },
+            yaxis: { title: "Value" },
+            margin: { t: 30, r: 20, b: 40, l: 40 }
+          });
+        }
+        
+        // Clear previous update interval for this stream if any.
+        if (chartIntervals[streamID]) {
+          clearInterval(chartIntervals[streamID]);
+        }
+        
+        // Update interval (every 200ms) for both views.
+        chartIntervals[streamID] = setInterval(() => {
+          const dataArr = window[streamID + "_parsedData"];
+          if (dataArr && dataArr.length > 0) {
+            // Prepare update arrays for the combined plot (16 traces)
+            let combinedX = Array.from({ length: 16 }, () => []);
+            let combinedY = Array.from({ length: 16 }, () => []);
+            // Prepare update arrays for each separate plot
+            let separateUpdates = [];
+            for (let i = 0; i < 16; i++) {
+              separateUpdates.push({ x: [], y: [] });
+            }
+            
+            while (dataArr.length > 0) {
+              const point = dataArr.shift();
+              for (let i = 1; i <= 16; i++) {
+                combinedX[i - 1].push(point.x);
+                combinedY[i - 1].push(point.y[i - 1]);
+              }
+              for (let i = 0; i < 16; i++) {
+                separateUpdates[i].x.push(point.x);
+                separateUpdates[i].y.push(point.y[i]);
+              }
+            }
+            
+            const traceIndices = Array.from({ length: 16 }, (v, k) => k);
+            Plotly.extendTraces(combinedDiv, { x: combinedX, y: combinedY }, traceIndices, MAX_DATA_POINTS);
+            
+            for (let i = 1; i <= 16; i++) {
+              const portDivId = "plot-" + streamID + "-port" + i;
+              Plotly.extendTraces(portDivId, { 
+                x: [separateUpdates[i - 1].x], 
+                y: [separateUpdates[i - 1].y] 
+              }, [0], MAX_DATA_POINTS);
+            }
+          }
+        }, 200);
+      }
+
+      // --- Kill (Disconnect) a Single Stream ---
+      async function killStream(streamID) {
+        try {
+          if (typeof corelink.destroyReceiver === "function") {
+            await corelink.destroyReceiver({ streamIDs: [streamID] });
+            console.log("Called destroyReceiver on stream", streamID);
+          } else if (typeof corelink.unsubscribe === "function") {
+            await corelink.unsubscribe({ streamIDs: [streamID] });
+            console.log("Called unsubscribe on stream", streamID);
+          } else {
+            throw new Error("No method available to kill stream " + streamID);
+          }
+          activeStreams[streamID] = false;
+          const streamEntry = document.getElementById("stream-entry-" + streamID);
+          if (streamEntry) streamEntry.remove();
+          const containerDiv = document.getElementById("plot-" + streamID);
+          if (containerDiv) containerDiv.remove();
+          if (chartIntervals[streamID]) {
+            clearInterval(chartIntervals[streamID]);
+            delete chartIntervals[streamID];
+          }
+          delete window[streamID + "_parsedData"];
+          delete activeStreams[streamID];
+          console.log("Stream", streamID, "killed.");
+        } catch (err) {
+          console.error("Error killing stream " + streamID, err);
+          alert("Error killing stream " + streamID + ": " + err);
+        }
+      }
+
+      // --- Disconnect All ---
+      async function disconnectAll() {
+        try {
+          if (typeof corelink.disconnect === "function") {
+            await corelink.disconnect();
+          } else {
+            location.reload();
+          }
+          connected = false;
+          document.getElementById("login-status").innerText = "Disconnected";
+          document.getElementById("login-status").style.color = "red";
+          document.getElementById("select-workspace-btn").disabled = true;
+          document.getElementById("list-streams-btn").disabled = true;
+          document.getElementById("disconnect-btn").disabled = true;
+        } catch (err) {
+          console.error("Disconnect error:", err);
+          alert("Failed to disconnect: " + err);
+        }
+      }
+
+      // --- Hook Up UI Buttons ---
+      document.getElementById("login-btn").onclick = doLogin;
+      document.getElementById("select-workspace-btn").onclick = populateWorkspaces;
+      document.getElementById("list-streams-btn").onclick = listStreams;
+      document.getElementById("disconnect-btn").onclick = disconnectAll;
+    </script>
+  </body>
+</html>
